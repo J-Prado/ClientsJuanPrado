@@ -12,6 +12,8 @@ $AutoContinueOnFailure = $true
 $ThrottleMs = 500
 $LogFile = "C:\Temp\CIS_GIS_Sync_$(Get-Date -Format yyyyMMdd_HHmmss).log"
 $CheckpointFile = "C:\Temp\CIS_GIS_Sync.checkpoint.json"
+$GeomX = 583593.7303
+$GeomY = 763169.3489
 
 #############################################
 # LOGGING
