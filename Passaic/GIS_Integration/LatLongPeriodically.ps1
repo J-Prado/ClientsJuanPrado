@@ -9,7 +9,7 @@ $PageSize   = 1000
 $ThrottleMs = 300
 $LogFile    = "C:\Temp\GIS_CIS_Sync_Day_$(Get-Date -Format yyyyMMdd_HHmmss).log"
 $Wkid       = 6527
-$DebugCsv   = "C:\Temp\testLat2.csv"
+#$DebugCsv   = "C:\Temp\testLat2.csv"
 
 #############################################
 # LOGGING
@@ -114,7 +114,7 @@ $offset = 0
 
 do {
     $body = @{
-        where               = "EditDate>=CURRENT_TIMESTAMP - 7"
+        where               = "EditDate>=CURRENT_TIMESTAMP - 30"
         outFields           = "OBJECTID,C_ACCOUNT"
         returnGeometry      = "true"
         outSR               = $Wkid
@@ -160,7 +160,7 @@ $skipped = 0
 foreach ($acctKey in $GISByAccount.Keys) {
 
     # Optional debug
-    $acctKey | Out-File -FilePath $DebugCsv -Append
+    #$acctKey | Out-File -FilePath $DebugCsv -Append
 
     $CISAccount =
         [AdvancedUtility.Services.BusinessObjects.Account]::GetByWhere(
@@ -194,7 +194,7 @@ foreach ($acctKey in $GISByAccount.Keys) {
 
         if ($CISAccount.Save()) {
             $updated++
-            Write-Log "Updated account $acctKey → Lat:$newLat Long:$newLon"
+            Write-Log "Updated account $acctKey ? Lat:$newLat Long:$newLon"
         }
         else {
             Write-Log "Validation failed for $acctKey : $($CISAccount.Validate())" "WARN"

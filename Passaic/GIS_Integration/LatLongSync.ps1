@@ -1,210 +1,269 @@
-#############################################
-# CIS to GIS Lat / Long SYNC SCRIPT (FULL)
-#############################################
+# =====================================================================
+# CIS ← GIS Latitude / Longitude One-Time Sync
+# =====================================================================
 
-#############################################
-# CONFIGURATION
-#############################################
-$PageSize   = 1000
-$ThrottleMs = 300
-$LogFile    = "C:\Temp\GIS_CIS_Sync_$(Get-Date -Format yyyyMMdd_HHmmss).log"
-$Wkid       = 6527
+[CmdletBinding()]
+param (
+    [Parameter(Mandatory)]
+    [string]$UserId,
 
-#############################################
-# LOGGING
-#############################################
+    [Parameter(Mandatory)]
+    [string]$Password,
+
+    [switch]$WhatIf
+)
+
+# ---------------------------------------------------------------------
+#region Configuration
+# ---------------------------------------------------------------------
+
+$Config = @{
+    CisAppLocation = 'E:\CIS4TEST\'
+    LogPath        = "C:\Temp\GIS_CIS_Sync_$(Get-Date -Format yyyyMMdd_HHmmss).log"
+    CheckpointPath = "C:\Temp\GIS_CIS_Checkpoint.txt"
+    PageSize       = 1000
+    ThrottleMs     = 300
+    Wkid           = 6527
+    GisModule      = 'PASSAICGIS'
+    ChunkSize      = 500
+}
+
+# ---------------------------------------------------------------------
+#endregion Configuration
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+#region Logging
+# ---------------------------------------------------------------------
+
 function Write-Log {
-    param (
+    param(
         [string]$Message,
-        [string]$Level = "INFO"
+        [ValidateSet('INFO','WARN','ERROR')]
+        [string]$Level = 'INFO'
     )
+
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$Level] $Message"
-    Add-Content -Path $LogFile -Value $line
-    Write-Host $line
+    Add-Content -Path $Config.LogPath -Value $line
+
+    if ($Level -ne 'INFO') {
+        Write-Host $line
+    }
 }
 
-#############################################
-# TOKEN HANDLING
-#############################################
-$script:Token = $null
-$script:TokenUrlValue = $null
-$script:TokenParams = $null
+# ---------------------------------------------------------------------
+#endregion Logging
+# ---------------------------------------------------------------------
 
-function Get-GISToken {
-    Write-Log "Requesting GIS token"
-    $resp = Invoke-RestMethod `
-        -Uri $script:TokenUrlValue `
-        -Method Post `
-        -Body $script:TokenParams `
-        -ContentType "application/x-www-form-urlencoded"
+# ---------------------------------------------------------------------
+#region CIS Bootstrap
+# ---------------------------------------------------------------------
 
-    if (-not $resp.token) {
-        throw "Failed to acquire GIS token"
+function Invoke-WithCisSession {
+    param(
+        [string]$UserId,
+        [string]$Password,
+        [scriptblock]$Script
+    )
+
+    [void][System.Reflection.Assembly]::LoadFrom(
+        (Join-Path $Config.CisAppLocation 'AdvancedUtility.ServicesLoader.dll')
+    )
+
+    $loader = New-Object AdvancedUtility.ServicesLoader.Loader
+    $cis    = $loader.GetCisApplication()
+
+    if (-not $cis.Open()) {
+        throw "Failed to open CIS application"
     }
 
-    $script:Token = $resp.token
-    Write-Log "GIS token acquired"
-}
-
-#############################################
-# INTEGRATION SETUP
-#############################################
-$module = "PASSAICGIS"
-$where  = "C_MODULE={0}"
-
-$IntegrationControl = [AdvancedUtility.Services.BusinessObjects.IntegrationSetup]::GetAllWhere($CisSession, $where, $module)
-
-function GetIntValue {
-    param ($key)
-    ([AdvancedUtility.Services.BusinessObjects.IntegrationValue]::GetByIntegrationKey(
-        $CisSession, $key
-    )).ExternalValue
-}
-
-$referer  = $IntegrationControl | Where-Object Property -eq "REFERER"
-$queryUrl = $IntegrationControl | Where-Object Property -eq "QUERYURL"
-$tokenUrl = $IntegrationControl | Where-Object Property -eq "TOKENURL"
-$user     = $IntegrationControl | Where-Object Property -eq "USERNAME"
-$password = $IntegrationControl | Where-Object Property -eq "PASSWORD"
-
-$script:TokenUrlValue = GetIntValue $tokenUrl.IntegrationKey
-$script:TokenParams = @{
-    username   = GetIntValue $user.IntegrationKey
-    password   = GetIntValue $password.IntegrationKey
-    client     = "referer"
-    referer    = GetIntValue $referer.IntegrationKey
-    expiration = "120"
-    f          = "json"
-}
-
-Get-GISToken
-
-#############################################
-# GIS HELPER
-#############################################
-function Select-GISFeature {
-    param ([array]$Features)
-
-    # Require geometry
-    $withGeom = $Features | Where-Object {
-        $_.geometry -and $_.geometry.x -and $_.geometry.y
-    }
-    #$withGeom |  out-file -filepath "C:\Temp\testLat.csv" -append
-
-    if (-not $withGeom) {
-        return $null
-    }
-
-    return $withGeom |
-        Sort-Object { $_.attributes.OBJECTID } |
-        Select-Object -First 1
-}
-
-#############################################
-# LOAD CIS DATA
-#############################################
-Write-Log "Loading CIS accounts"
-$CISAccounts = [AdvancedUtility.Services.BusinessObjects.Account]::GetAll($CisSession)
-#$CISAccounts = [AdvancedUtility.Services.BusinessObjects.Account]::GetAllWhere($CisSession, "C_ACCOUNT in ('000108', '096810')")
-
-$CISByAccount = @{}
-foreach ($acct in $CISAccounts) {
-    $CISByAccount[$acct.AccountNumber] = $acct
-}
-
-Write-Log "Loaded $($CISByAccount.Count) CIS accounts"
-
-#############################################
-# LOAD GIS DATA (PAGINATED)
-#############################################
-Write-Log "Loading GIS features"
-
-$GISQueryUrl = GetIntValue $queryUrl.IntegrationKey
-$GISByAccount = @{}
-$offset = 0
-
-do
-{
-    $body = @{
-        #where               = "C_ACCOUNT = '000108'"
-        where               = "1=1"
-        outFields           = "OBJECTID,C_ACCOUNT"
-        returnGeometry      = "true"
-        outSR               = $Wkid
-        resultOffset        = $offset
-        resultRecordCount   = $PageSize
-        f                   = "json"
-        token               = $script:Token
-    }
-
-    $resp = Invoke-RestMethod -Uri $GISQueryUrl -Method Get -Body $body -ErrorAction Stop
-    
-    $features = $resp.features
-    $count = if ($features) { $features.Count } else { 0 }
-
-    foreach ($f in $features) {
-        $acct = $f.attributes.C_ACCOUNT
-        if (-not $GISByAccount.ContainsKey($acct)) {
-            $GISByAccount[$acct] = @()
+    try {
+        $session = $cis.GetSession($UserId, $Password)
+        if (-not $session.Open()) {
+            throw "Failed to open CIS session"
         }
-        $GISByAccount[$acct] += $f
+
+        & $Script $session
     }
-    #$GISByAccount |  out-file -filepath "C:\Temp\testLat.csv" -append
+    finally {
+        if ($session) { $session.Close() }
+        $cis.Close()
+    }
+}
 
-    Write-Log "Fetched $count GIS records"
-    $offset += $PageSize
-    Start-Sleep -Milliseconds $ThrottleMs
+# ---------------------------------------------------------------------
+#endregion CIS Bootstrap
+# ---------------------------------------------------------------------
 
-} while ($count -eq $PageSize)
+# ---------------------------------------------------------------------
+#region GIS Helpers
+# ---------------------------------------------------------------------
 
-Write-Log "Loaded GIS accounts: $($GISByAccount.Count)"
+function Get-GisToken {
+    param($TokenUrl, $Params)
 
-#############################################
-# SYNC CIS ← GIS
-#############################################
-Write-Log "Starting CIS latitude/longitude update"
+    (Invoke-RestMethod -Uri $TokenUrl -Method Post `
+        -Body $Params -ContentType "application/x-www-form-urlencoded").token
+}
 
-$updated = 0
-$skipped = 0
+function Get-GisFeatures {
+    param($QueryUrl, $Token)
 
-foreach ($acctKey in $CISByAccount.Keys) {
+    $all    = @()
+    $offset = 0
 
-    if (-not $GISByAccount.ContainsKey($acctKey)) {
-        $skipped++
+    do {
+        $resp = Invoke-RestMethod -Uri $QueryUrl -Method Get -Body @{
+            where="1=1"; outFields="OBJECTID,C_ACCOUNT"
+            returnGeometry="true"; outSR=$Config.Wkid
+            resultOffset=$offset; resultRecordCount=$Config.PageSize
+            f="json"; token=$Token
+        }
+
+        $batch = $resp.features
+        if ($batch) {
+            $all += $batch
+            $offset += $Config.PageSize
+            Start-Sleep -Milliseconds $Config.ThrottleMs
+        }
+    }
+    while ($batch.Count -eq $Config.PageSize)
+
+    return $all
+}
+
+# ---------------------------------------------------------------------
+#endregion GIS Helpers
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+#region Sync Engine
+# ---------------------------------------------------------------------
+
+function Invoke-LatLongSyncInternal {
+    param($Session)
+
+    $cisAccounts = [AdvancedUtility.Services.BusinessObjects.Account]::GetAll($Session)
+
+    $cisByAccount = @{}
+    foreach ($acct in $cisAccounts) {
+        $cisByAccount[$acct.AccountNumber] = $acct
+    }
+
+    $integration = [AdvancedUtility.Services.BusinessObjects.IntegrationSetup]::GetAllWhere(
+        $Session, "C_MODULE={0}", $Config.GisModule
+    )
+
+    function Get-Val($key) {
+        ([AdvancedUtility.Services.BusinessObjects.IntegrationValue]::GetByIntegrationKey(
+            $Session, $key
+        )).ExternalValue
+    }
+
+    $queryUrl = Get-Val (($integration | Where Property -eq 'QUERYURL').IntegrationKey)
+    $tokenUrl = Get-Val (($integration | Where Property -eq 'TOKENURL').IntegrationKey)
+
+    $token = Get-GisToken $tokenUrl @{
+        username = Get-Val (($integration | Where Property -eq 'USERNAME').IntegrationKey)
+        password = Get-Val (($integration | Where Property -eq 'PASSWORD').IntegrationKey)
+        client='referer'
+        referer=Get-Val (($integration | Where Property -eq 'REFERER').IntegrationKey)
+        f='json'
+    }
+
+    $features = Get-GisFeatures $queryUrl $token
+
+    $gisByAccount = @{}
+   foreach ($f in $features) {
+
+    if (-not $f.attributes) { continue }
+
+    $acct = $f.attributes.C_ACCOUNT
+
+    # Skip GIS features with no account number
+    if ([string]::IsNullOrWhiteSpace($acct)) {
+        Write-Log "This '${$f.attributes.OBJECTID}' is being Skipped no Account information."
         continue
     }
 
-    $cis = $CISByAccount[$acctKey]
-    $gisFeature = Select-GISFeature -Features $GISByAccount[$acctKey]
-
-    if (-not $gisFeature) {
-        Write-Log "No valid GIS geometry for account $acctKey" "WARN"
-        $skipped++
-        continue
+    if (-not $gisByAccount.ContainsKey($acct)) {
+        $gisByAccount[$acct] = @()
     }
 
-    $newLat = [Math]::Round([double]$gisFeature.geometry.y, 9)
-    $newLon = [Math]::Round([double]$gisFeature.geometry.x, 9)
-
-    if ($cis.Latitude -ne $newLat -or $cis.Longitude -ne $newLon) {
-        $cis.Latitude  = $newLat
-        $cis.Longitude = $newLon
-        if ($cis.Save()) {
-            $updated++
-            Write-Log "Updated account $acctKey → Lat:$newLat Long:$newLon"
-        }
-        else {
-            Write-Log "Validation failed for $acctKey : $($CISAccount.Validate())" "WARN"
-            $skipped++
-        }
-
-        Write-Log "Updated account $acctKey → Lat:$newLat Long:$newLon"
+    $gisByAccount[$acct] += $f
     }
+
+    $accountKeys = $cisByAccount.Keys | Sort-Object
+    $total       = $accountKeys.Count
+
+    $resumeFrom = if (Test-Path $Config.CheckpointPath) {
+        Get-Content $Config.CheckpointPath
+    }
+
+    if ($resumeFrom) {
+        $accountKeys = $accountKeys | Where-Object { $_ -gt $resumeFrom }
+        Write-Log "Resuming from account $resumeFrom"
+    }
+
+    $processed = 0
+    $updated   = 0
+
+    foreach ($chunk in ($accountKeys | ForEach-Object -Begin {$i=0} -Process {
+        if ($i++ % $Config.ChunkSize -eq 0) { ,@() }
+        $_
+    })) {
+
+        foreach ($acctKey in $chunk) {
+
+            $processed++
+            Write-Progress -Activity "CIS ← GIS Sync" `
+                -Status "Processing $acctKey ($processed / $total)" `
+                -PercentComplete (($processed / $total) * 100)
+
+            if (-not $gisByAccount.ContainsKey($acctKey)) { 
+                Write-Log "This $acctKey is not part of the GIS service."
+                continue 
+            }
+            
+            $multiple = $gisByAccount[$acctKey].Count
+
+            if($multiple -gt 1){
+                Write-Log "This $acctKey has $multiple records in GIS."
+            }
+            
+            $gis = $gisByAccount[$acctKey] |
+                Where-Object { $_.geometry.x -and $_.geometry.y } |
+                Sort-Object { $_.attributes.OBJECTID } |
+                Select-Object -First 1
+
+            if (-not $gis) { continue }
+
+            $cis = $cisByAccount[$acctKey]
+            $lat = [math]::Round($gis.geometry.y, 9)
+            $lon = [math]::Round($gis.geometry.x, 9)
+
+            if ($cis.Latitude -ne $lat -or $cis.Longitude -ne $lon) {
+                if (-not $WhatIf) {
+                    $cis.Latitude = $lat
+                    $cis.Longitude = $lon
+                    $cis.Save() | Out-Null
+                }
+                $updated++
+            }
+
+            Set-Content -Path $Config.CheckpointPath -Value $acctKey
+        }
+    }
+
+    Write-Progress -Activity "CIS ← GIS Sync" -Completed
+    Write-Log "Updated accounts: $updated"
 }
 
-#############################################
-# SUMMARY
-#############################################
-Write-Log "SYNC COMPLETE"
-Write-Log "Updated accounts: $updated"
-Write-Log "Skipped accounts: $skipped"
+# ---------------------------------------------------------------------
+#endregion Sync Engine
+# ---------------------------------------------------------------------
+
+Invoke-WithCisSession -UserId $UserId -Password $Password {
+    param($session)
+    Invoke-LatLongSyncInternal $session
+}
